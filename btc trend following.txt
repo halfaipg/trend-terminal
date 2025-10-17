@@ -1,0 +1,192 @@
+//@version=5
+// Created by Half
+strategy("Crypto Killer w/ TF", overlay=true, pyramiding=0, default_qty_type= strategy.percent_of_equity, default_qty_value = 90, calc_on_order_fills=true, slippage=0,commission_type=strategy.commission.percent,commission_value=0.075)
+
+strat_dir_input = input.string(title="Strategy Direction", defval="all", options=["long", "short", "all"])
+//////////////////////////////////////////////////////////////////////
+// Testing Start dates
+testStartYear = input.int(2013, "Backtest Start Year")
+testStartMonth = input.int(1, "Backtest Start Month")
+testStartDay = input.int(1, "Backtest Start Day")
+testPeriodStart = timestamp(testStartYear,testStartMonth,testStartDay,0,0)
+//Stop date if you want to use a specific range of dates
+testStopYear = input.int(2030, "Backtest Stop Year")
+testStopMonth = input.int(12, "Backtest Stop Month")
+testStopDay = input.int(30, "Backtest Stop Day")
+testPeriodStop = timestamp(testStopYear,testStopMonth,testStopDay,0,0)
+
+
+testPeriod() =>
+    time >= testPeriodStart and time <= testPeriodStop ? true : false
+// Component Code Stop
+//////////////////////////////////////////////////////////////////////
+//INPUT
+src = input.source(close, title="Source")
+modeSwitch = input.string("Hma", title="Hull Variation", options=["Hma", "Thma", "Ehma"])
+length = input.int(48, title="Length(48 for swing, 200 for LT entry)")
+length1 = input.int(1000, title="HMA Trend Filter Length")
+switchColor = input.bool(true, "Color Hull according to trend?")
+candleCol = input.bool(false,title="Color candles based on Hull's Trend?")
+visualSwitch  = input.bool(true, title="Show as a Band?")
+thicknesSwitch = input.int(1, title="Line Thickness")
+transpSwitch = input.int(40, title="Band Transparency",step=5)
+confirmBars = input.int(0, title="Entry confirm bars (0=now, 1=1 bar ago)", minval=0, maxval=5)
+stopPercent = input.float(10.0, title="Protective stop %", minval=0.0, step=0.1)
+useStopLoss = input.bool(false, title="Use Protective Stop on Disagreement?")
+useTrendFilter = input.bool(true, title="Use Long-term Trend Filter?")
+
+//FUNCTIONS
+//HMA
+HMA(_src, _length) =>  ta.wma(2 * ta.wma(_src, _length / 2) - ta.wma(_src, _length), math.round(math.sqrt(_length)))
+//EHMA    
+EHMA(_src, _length) =>  ta.ema(2 * ta.ema(_src, _length / 2) - ta.ema(_src, _length), math.round(math.sqrt(_length)))
+//THMA    
+THMA(_src, _length) =>  ta.wma(ta.wma(_src,_length / 3) * 3 - ta.wma(_src, _length / 2) - ta.wma(_src, _length), _length)
+    
+//SWITCH
+Mode(modeSwitch, src, len) =>
+      modeSwitch == "Hma"  ? HMA(src, len) :
+      modeSwitch == "Ehma" ? EHMA(src, len) : 
+      modeSwitch == "Thma" ? THMA(src, len/2) : na
+      
+//OUT
+HULL = Mode(modeSwitch, src, length)
+MHULL = HULL[0]
+SHULL = HULL[2]
+
+TREND = Mode(modeSwitch, src, length1)
+TFF = TREND[0]
+TFS = TREND[1]
+
+//COLOR
+hullColor = switchColor ? (HULL > HULL[2] ? color.new(color.green, 0) : color.new(color.red, 0)) : color.new(color.orange, 0)
+tfcolor = switchColor ? (TREND > TREND[1] ? color.new(color.green, 0) : color.new(color.red, 0)) : color.new(color.orange, 0)
+
+//PLOT
+///< Frame
+Fi1 = plot(MHULL, title="MHULL", color=color.new(hullColor, 50), linewidth=thicknesSwitch)
+Fi2 = plot(visualSwitch ? SHULL : na, title="SHULL", color=color.new(hullColor, 50), linewidth=thicknesSwitch)
+Fi3 = plot(useTrendFilter ? TFF : na, title="TF", color=color.new(tfcolor, 50), linewidth=thicknesSwitch)
+
+///< Ending Filler
+fill(Fi1, Fi2, title="Band Filler", color=color.new(hullColor, transpSwitch))
+///BARCOLOR
+barcolor(color = candleCol ? (switchColor ? hullColor : na) : na)
+
+// State for stop management
+var bool  longSLArmed = false
+var bool  shortSLArmed = false
+var bool  stopJustFilled = false
+var float prevPosSize = 0.0
+var float longStopLevel = na
+var float shortStopLevel = na
+
+// Trading logic: exit via protective stop; enter only when both agree; same-bar flips
+hullUp   = HULL[confirmBars] > HULL[confirmBars + 2]
+hullDown = HULL[confirmBars] < HULL[confirmBars + 2]
+trendUp  = TREND[confirmBars] > TREND[confirmBars + 1]
+trendDown= TREND[confirmBars] < TREND[confirmBars + 1]
+
+// Immediate short-term slope for stop arming/canceling
+hullUpNow   = HULL[0] > HULL[2]
+hullDownNow = HULL[0] < HULL[2]
+trendUpNow   = TREND[0] > TREND[1]
+trendDownNow = TREND[0] < TREND[1]
+
+longAgree  = (useTrendFilter ? trendUp : true) and hullUp  and testPeriod()
+shortAgree = (useTrendFilter ? trendDown : true) and hullDown and testPeriod()
+
+allowLong  = strat_dir_input != "short"
+allowShort = strat_dir_input != "long"
+
+// Reset per-bar flag
+if barstate.isnew
+    stopJustFilled := false
+
+// 1) Entry logic - always in market when trend filter is off
+if useTrendFilter
+    // With trend filter: both must agree
+    if shortAgree and allowShort and not stopJustFilled
+        if strategy.position_size > 0
+            strategy.close("buy")
+        // cancel any protective stops before entering new side
+        strategy.cancel("SL-Long")
+        strategy.cancel("SL-Short")
+        longSLArmed := false
+        shortSLArmed := false
+        strategy.entry("sell", strategy.short)
+    else if longAgree and allowLong and not stopJustFilled
+        if strategy.position_size < 0
+            strategy.close("sell")
+        // cancel any protective stops before entering new side
+        strategy.cancel("SL-Long")
+        strategy.cancel("SL-Short")
+        longSLArmed := false
+        shortSLArmed := false
+        strategy.entry("buy", strategy.long)
+else
+    // Without trend filter: only Hull direction matters - always in market
+    if hullDown and allowShort and not stopJustFilled
+        if strategy.position_size > 0
+            strategy.close("buy")
+        // cancel any protective stops before entering new side
+        strategy.cancel("SL-Long")
+        strategy.cancel("SL-Short")
+        longSLArmed := false
+        shortSLArmed := false
+        strategy.entry("sell", strategy.short)
+    else if hullUp and allowLong and not stopJustFilled
+        if strategy.position_size < 0
+            strategy.close("sell")
+        // cancel any protective stops before entering new side
+        strategy.cancel("SL-Long")
+        strategy.cancel("SL-Short")
+        longSLArmed := false
+        shortSLArmed := false
+        strategy.entry("buy", strategy.long)
+
+if useStopLoss
+    // 2) Manage protective stops based on immediate short-term momentum (runs every bar)
+    // Long position: when HULL turns down, arm a stop; when back up, remove it
+    if strategy.position_size > 0
+        if hullDownNow
+            if not longSLArmed
+                longStopLevel := close * (1 - stopPercent/100.0)
+                longSLArmed := true
+            strategy.exit("SL-Long", from_entry="buy", stop=longStopLevel)
+        else if hullUpNow
+            if longSLArmed
+                longSLArmed := false
+                longStopLevel := na
+                strategy.cancel("SL-Long")
+    // Short position: when HULL turns up, arm a stop; when back down, remove it
+    if strategy.position_size < 0
+        if hullUpNow
+            if not shortSLArmed
+                shortStopLevel := close * (1 + stopPercent/100.0)
+                shortSLArmed := true
+            strategy.exit("SL-Short", from_entry="sell", stop=shortStopLevel)
+        else if hullDownNow
+            if shortSLArmed
+                shortSLArmed := false
+                shortStopLevel := na
+                strategy.cancel("SL-Short")
+
+    // Reset state if a stop was filled (position size changed to 0 while a stop was armed)
+    if prevPosSize > 0 and strategy.position_size == 0 and longSLArmed
+        longSLArmed := false
+        strategy.cancel("SL-Long")
+        stopJustFilled := true
+    if prevPosSize < 0 and strategy.position_size == 0 and shortSLArmed
+        shortSLArmed := false
+        strategy.cancel("SL-Short")
+        stopJustFilled := true
+else
+    // Original logic: exit immediately on disagreement
+    if strategy.position_size > 0 and hullDownNow
+        strategy.close("buy")
+    if strategy.position_size < 0 and hullUpNow
+        strategy.close("sell")
+
+// Track previous position for next bar
+prevPosSize := strategy.position_size
